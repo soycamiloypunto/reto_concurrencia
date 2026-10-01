@@ -1,37 +1,45 @@
 package com.trading.events.infrastructure.config;
 
+import com.trading.events.domain.exception.TransientProcessingException;
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
-import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
-import io.github.resilience4j.retry.RetryConfig;
-import io.github.resilience4j.retry.RetryRegistry;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.time.Duration;
+import java.util.concurrent.TimeoutException;
 
-@Configuration
+/**
+ * Instancias de Resilience4j creadas por código (sin anotaciones ni AOP) para que el orden de
+ * los decoradores sea explícito: Retry( CircuitBreaker( Bulkhead( llamada ) ) ).
+ */
+@Configuration(proxyBeanMethods = false)
 public class ResilienceConfig {
 
     @Bean
-    public CircuitBreakerRegistry circuitBreakerRegistry() {
+    public CircuitBreaker marketCircuitBreaker(GatewayProperties properties) {
+        GatewayProperties.Breaker breaker = properties.breaker();
         CircuitBreakerConfig config = CircuitBreakerConfig.custom()
-            .failureRateThreshold(50)
-            .waitDurationInOpenState(Duration.ofSeconds(30))
-            .slidingWindowSize(10)
-            .minimumNumberOfCalls(5)
-            .permittedNumberOfCallsInHalfOpenState(3)
-            .automaticTransitionFromOpenToHalfOpenEnabled(true)
-            .build();
-        return CircuitBreakerRegistry.of(config);
+                .failureRateThreshold(breaker.failureRateThreshold())
+                .slidingWindowSize(breaker.slidingWindowSize())
+                .minimumNumberOfCalls(breaker.minimumNumberOfCalls())
+                .waitDurationInOpenState(breaker.waitDurationInOpen())
+                .permittedNumberOfCallsInHalfOpenState(3)
+                .automaticTransitionFromOpenToHalfOpenEnabled(true)
+                // Solo fallos de infraestructura abren el circuito; los errores de negocio no cuentan.
+                .recordExceptions(TransientProcessingException.class, TimeoutException.class)
+                .build();
+        return CircuitBreaker.of("market", config);
     }
 
     @Bean
-    public RetryRegistry retryRegistry() {
-        RetryConfig config = RetryConfig.custom()
-            .maxAttempts(3)
-            .waitDuration(Duration.ofMillis(500))
-            .retryExceptions(Exception.class)
-            .build();
-        return RetryRegistry.of(config);
+    public Bulkhead marketBulkhead(GatewayProperties properties) {
+        BulkheadConfig config = BulkheadConfig.custom()
+                .maxConcurrentCalls(properties.bulkheadMaxCalls())
+                .maxWaitDuration(Duration.ZERO)
+                .build();
+        return Bulkhead.of("market", config);
     }
 }

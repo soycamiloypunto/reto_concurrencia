@@ -1,0 +1,16 @@
+# Build
+target/
+*.log
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+.DS_Store
+
+# Material de estudio personal (no se sube al repositorio)
+plan_implementacion_concurrencia.md

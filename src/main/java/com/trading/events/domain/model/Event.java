@@ -1,136 +1,108 @@
 package com.trading.events.domain.model;
 
+import com.trading.events.domain.exception.InvalidEventException;
+
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Representa un evento de trading que debe ser procesado concurrentemente.
- * Cada evento contiene información sobre una operación financiera que afecta
- * cuentas y balances en tiempo real.
+ * Evento de trading inmutable. Cada transición de estado devuelve una nueva instancia,
+ * por lo que es seguro compartirlo entre hilos sin sincronización.
  */
 public record Event(
-    UUID eventId,
-    String accountId,
-    EventType eventType,
-    BigDecimal amount,
-    LocalDateTime timestamp,
-    EventStatus status,
-    String marketSource) {
+        UUID eventId,
+        String accountId,
+        EventType eventType,
+        BigDecimal amount,
+        Instant timestamp,
+        EventStatus status,
+        String marketSource,
+        String failureReason) {
+
+    /** Máximo de decimales permitidos en un monto (coincide con la escala de {@link Account}). */
+    public static final int MAX_AMOUNT_SCALE = 4;
 
     /**
-     * Tipos de eventos soportados en el sistema.
+     * Crea un evento en estado RECEIVED. Si {@code eventId} es nulo se genera uno nuevo;
+     * un id provisto por el cliente habilita la idempotencia.
      */
-    public enum EventType {
-        DEPOSIT,
-        WITHDRAWAL,
-        TRADE_EXECUTION,
-        FEE_APPLIED,
-        INTEREST_CALCULATION
-    }
-
-    /**
-     * Estados posibles de un evento durante su procesamiento.
-     */
-    public enum EventStatus {
-        RECEIVED,
-        PROCESSING,
-        COMPLETED,
-        FAILED
-    }
-
-    /**
-     * Crea un nuevo evento con el estado inicial RECEIVED.
-     */
-    public static Event createNewEvent(String accountId, EventType eventType,
-                                     BigDecimal amount, String marketSource) {
+    public static Event received(UUID eventId, String accountId, EventType eventType,
+                                 BigDecimal amount, String marketSource) {
         return new Event(
-            UUID.randomUUID(),
-            accountId,
-            eventType,
-            amount,
-            LocalDateTime.now(),
-            EventStatus.RECEIVED,
-            marketSource
-        );
+                eventId != null ? eventId : UUID.randomUUID(),
+                accountId,
+                eventType,
+                amount,
+                Instant.now(),
+                EventStatus.RECEIVED,
+                marketSource,
+                null);
     }
 
-    /**
-     * Marca el evento como PROCESSING si está en estado RECEIVED.
-     * @return Nuevo evento con estado actualizado o lanza excepción si no es válido transicionar.
-     * @throws IllegalStateException si el evento no está en estado RECEIVED
-     */
     public Event markAsProcessing() {
-        if (this.status != EventStatus.RECEIVED) {
-            throw new IllegalStateException("Event cannot transition to PROCESSING from " + this.status);
-        }
-        return new Event(
-            this.eventId,
-            this.accountId,
-            this.eventType,
-            this.amount,
-            this.timestamp,
-            EventStatus.PROCESSING,
-            this.marketSource
-        );
+        requireStatus(EventStatus.RECEIVED, EventStatus.PROCESSING);
+        return withStatus(EventStatus.PROCESSING, null);
     }
 
-    /**
-     * Marca el evento como COMPLETED si está en estado PROCESSING.
-     * @return Nuevo evento con estado actualizado
-     * @throws IllegalStateException si el evento no está en estado PROCESSING
-     */
     public Event markAsCompleted() {
-        if (this.status != EventStatus.PROCESSING) {
-            throw new IllegalStateException("Event cannot transition to COMPLETED from " + this.status);
-        }
-        return new Event(
-            this.eventId,
-            this.accountId,
-            this.eventType,
-            this.amount,
-            this.timestamp,
-            EventStatus.COMPLETED,
-            this.marketSource
-        );
+        requireStatus(EventStatus.PROCESSING, EventStatus.COMPLETED);
+        return withStatus(EventStatus.COMPLETED, null);
     }
 
     /**
-     * Marca el evento como FAILED si está en estado PROCESSING.
-     * @return Nuevo evento con estado actualizado
-     * @throws IllegalStateException si el evento no está en estado PROCESSING
+     * Marca el evento como fallido. Se permite desde RECEIVED (rechazo previo al procesamiento)
+     * y desde PROCESSING.
      */
-    public Event markAsFailed() {
-        if (this.status != EventStatus.PROCESSING) {
-            throw new IllegalStateException("Event cannot transition to FAILED from " + this.status);
+    public Event markAsFailed(String reason) {
+        if (status == EventStatus.COMPLETED || status == EventStatus.FAILED) {
+            throw new IllegalStateException("Event cannot transition to FAILED from " + status);
         }
-        return new Event(
-            this.eventId,
-            this.accountId,
-            this.eventType,
-            this.amount,
-            this.timestamp,
-            EventStatus.FAILED,
-            this.marketSource
-        );
+        return withStatus(EventStatus.FAILED, reason);
     }
 
     /**
-     * Valida que el evento tenga datos consistentes para procesamiento.
-     * @throws IllegalArgumentException si algún campo es inválido
+     * Valida la consistencia de los datos del evento.
+     *
+     * @throws InvalidEventException si algún campo es inválido
      */
     public void validate() {
-        if (accountId == null || accountId.isBlank()) {
-            throw new IllegalArgumentException("Account ID cannot be null or empty");
+        if (isBlank(accountId)) {
+            throw invalid("Account ID cannot be null or empty");
         }
         if (eventType == null) {
-            throw new IllegalArgumentException("Event type cannot be null");
+            throw invalid("Event type cannot be null");
         }
-        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new IllegalArgumentException("Amount must be positive");
+        if (isBlank(marketSource)) {
+            throw invalid("Market source cannot be null or empty");
         }
-        if (marketSource == null || marketSource.isBlank()) {
-            throw new IllegalArgumentException("Market source cannot be null or empty");
+        validateAmount();
+    }
+
+    private void validateAmount() {
+        if (amount == null || amount.signum() <= 0) {
+            throw invalid("Amount must be positive");
         }
+        if (amount.stripTrailingZeros().scale() > MAX_AMOUNT_SCALE) {
+            throw invalid("Amount cannot have more than " + MAX_AMOUNT_SCALE + " decimals");
+        }
+    }
+
+    private void requireStatus(EventStatus expected, EventStatus target) {
+        if (status != expected) {
+            throw new IllegalStateException("Event cannot transition to " + target + " from " + status);
+        }
+    }
+
+    private Event withStatus(EventStatus newStatus, String reason) {
+        return new Event(eventId, accountId, eventType, amount, timestamp, newStatus, marketSource, reason);
+    }
+
+    private InvalidEventException invalid(String reason) {
+        return InvalidEventException.because(eventId, accountId, reason);
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 }

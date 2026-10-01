@@ -1,23 +1,17 @@
+spring:
+  application:
+    name: events-processing
+  main:
+    web-application-type: reactive
+
 server:
   port: 8080
   shutdown: graceful
 
-spring:
-  main:
-    web-application-type: reactive
-    allow-bean-definition-overriding: true
-
-  threads:
-    virtual:
-      enabled: true
-
 logging:
   level:
     root: INFO
-    org.springframework: INFO
-    com.trading.events: DEBUG
-    reactor.netty: INFO
-    io.github.resilience4j: DEBUG
+    com.trading.events: INFO
 
 management:
   endpoints:
@@ -31,66 +25,28 @@ management:
     tags:
       application: ${spring.application.name}
 
-# Configuración de pools de hilos para manejo de concurrencia
+# Parámetros de concurrencia y resiliencia. Todo se puede sobreescribir por variable de entorno
+# (p. ej. APP_CONCURRENCY_LANES=128).
 app:
   concurrency:
-    event-processing:
-      thread-pool-size: 16
-      queue-capacity: 100
-      max-concurrent-events: 100
-    io-operations:
-      thread-pool-size: 8
-      queue-capacity: 50
-      max-concurrent-requests: 50
-
-# Configuración de timeouts para operaciones críticas
-resilience4j:
-  circuitbreaker:
-    configs:
-      default:
-        slidingWindowType: COUNT_BASED
-        slidingWindowSize: 10
-        failureRateThreshold: 50
-        waitDurationInOpenState: 5s
-        permittedNumberOfCallsInHalfOpenState: 3
-        automaticTransitionFromOpenToHalfOpenEnabled: true
-        registerHealthIndicator: true
-    instances:
-      eventProcessing:
-        baseConfig: default
-        failureRateThreshold: 30
-        waitDurationInOpenState: 10s
-
-  retry:
-    configs:
-      default:
-        maxAttempts: 3
-        waitDuration: 100ms
-        enableExponentialBackoff: true
-        exponentialBackoffMultiplier: 2
-    instances:
-      externalService:
-        baseConfig: default
-
-  bulkhead:
-    configs:
-      default:
-        maxConcurrentCalls: 20
-        maxWaitDuration: 10ms
-    instances:
-      eventProcessing:
-        maxConcurrentCalls: 50
-        maxWaitDuration: 5ms
-
-  thread-pool-bulkhead:
-    configs:
-      default:
-        maxThreadPoolSize: 10
-        coreThreadPoolSize: 5
-        queueCapacity: 20
-    instances:
-      eventProcessing:
-        baseConfig: default
-        maxThreadPoolSize: 20
-        coreThreadPoolSize: 10
-        queueCapacity: 50
+    lanes: 64                 # paralelismo máximo entre cuentas
+    lane-queue-capacity: 1000 # tareas en espera por lane antes de responder 429
+    max-batch-concurrency: 64
+    max-batch-size: 1000
+  gateway:
+    min-latency: 5ms
+    max-latency: 20ms
+    failure-rate: 0.0         # > 0 solo para pruebas de caos
+    timeout: 2s
+    bulkhead-max-calls: 512
+    breaker:
+      failure-rate-threshold: 50
+      sliding-window-size: 20
+      minimum-number-of-calls: 10
+      wait-duration-in-open: 10s
+    retry:
+      max-attempts: 2
+      backoff: 50ms
+  store:
+    max-events: 100000
+    ttl: 1h
